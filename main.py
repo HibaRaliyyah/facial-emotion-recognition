@@ -6,6 +6,7 @@ from PIL import Image
 import os
 import io
 import base64
+import mediapipe as mp
 
 app = Flask(__name__)
 
@@ -15,6 +16,11 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
 labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
 
+mp_face = mp.solutions.face_detection.FaceDetection(
+    model_selection=0,
+    min_detection_confidence=0.5
+)
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -22,7 +28,7 @@ def health():
 @app.route("/predict", methods=["POST"])
 def predict():
 
-    # INPUT
+    # ===== INPUT =====
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
     elif request.is_json and "image" in request.json:
@@ -31,21 +37,40 @@ def predict():
     else:
         return jsonify({"error": "No image provided"}), 400
 
-    # PREPROCESS
     img = np.array(image)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    face = cv2.resize(gray, (48, 48)).flatten() / 255.0
+    rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    # PREDICT
+    # ===== FACE DETECTION =====
+    results = mp_face.process(rgb)
+
+    if not results.detections:
+        return jsonify({"error": "No face detected"}), 400
+
+    bbox = results.detections[0].location_data.relative_bounding_box
+    h, w, _ = img.shape
+
+    x = int(bbox.xmin * w)
+    y = int(bbox.ymin * h)
+    bw = int(bbox.width * w)
+    bh = int(bbox.height * h)
+
+    face_img = img[y:y+bh, x:x+bw]
+
+    # ===== PREPROCESS (MATCH TRAINING) =====
+    gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
+    face = cv2.resize(gray, (48, 48))
+    face = face.flatten() / 255.0
+
+    # ===== PREDICT =====
     probs = model.predict_proba([face])[0]
 
     result = {labels[i]: float(probs[i]) for i in range(len(labels))}
-
     dominant = labels[int(np.argmax(probs))]
+    confidence = float(np.max(probs))
 
     return jsonify({
         "dominant_emotion": dominant,
-        "confidence": float(np.max(probs)),
+        "confidence": confidence,
         "all_emotions": result
     })
 
