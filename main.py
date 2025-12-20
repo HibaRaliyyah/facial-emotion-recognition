@@ -31,7 +31,7 @@ def predict():
 
     image = None
 
-    # 1️⃣ multipart/form-data
+    # 1️⃣ multipart/form-data (binary)
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
 
@@ -40,8 +40,9 @@ def predict():
         image_bytes = base64.b64decode(request.json["image"])
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    # 3️⃣ image URL JSON (Telegram)
+    # 3️⃣ image_url JSON (THIS IS WHAT n8n SENDS)
     elif request.is_json and "image_url" in request.json:
+        import requests
         resp = requests.get(request.json["image_url"], timeout=10)
         resp.raise_for_status()
         image = Image.open(io.BytesIO(resp.content)).convert("RGB")
@@ -49,26 +50,23 @@ def predict():
     else:
         return jsonify({"error": "No image provided"}), 400
 
+    # ===== IMAGE PROCESSING =====
     img = np.array(image)
     rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     results = mp_face.process(rgb)
-
     if not results.detections:
         return jsonify({"error": "No face detected"}), 400
 
     bbox = results.detections[0].location_data.relative_bounding_box
     h, w, _ = img.shape
 
-    x = max(0, int(bbox.xmin * w))
-    y = max(0, int(bbox.ymin * h))
+    x = int(bbox.xmin * w)
+    y = int(bbox.ymin * h)
     bw = int(bbox.width * w)
     bh = int(bbox.height * h)
 
     face_img = img[y:y+bh, x:x+bw]
-
-    if face_img.size == 0:
-        return jsonify({"error": "Invalid face crop"}), 400
 
     gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
     face = cv2.resize(gray, (48, 48))
@@ -85,6 +83,7 @@ def predict():
         "confidence": confidence,
         "all_emotions": result
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
