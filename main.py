@@ -26,31 +26,33 @@ mp_face = mp.solutions.face_detection.FaceDetection(
 def health():
     return jsonify({"status": "ok"})
 
-
 @app.route("/predict", methods=["POST"])
 def predict():
 
-    # ===== INPUT HANDLING =====
     image = None
 
+    # 1️⃣ multipart/form-data
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
 
+    # 2️⃣ base64 JSON
     elif request.is_json and "image" in request.json:
         image_bytes = base64.b64decode(request.json["image"])
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
+    # 3️⃣ image URL JSON (Telegram)
     elif request.is_json and "image_url" in request.json:
         resp = requests.get(request.json["image_url"], timeout=10)
+        resp.raise_for_status()
         image = Image.open(io.BytesIO(resp.content)).convert("RGB")
 
     else:
         return jsonify({"error": "No image provided"}), 400
 
     img = np.array(image)
+    rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    # ===== FACE DETECTION (RGB REQUIRED) =====
-    results = mp_face.process(img)
+    results = mp_face.process(rgb)
 
     if not results.detections:
         return jsonify({"error": "No face detected"}), 400
@@ -58,23 +60,20 @@ def predict():
     bbox = results.detections[0].location_data.relative_bounding_box
     h, w, _ = img.shape
 
-    # ===== SAFE BOUNDING BOX =====
-    x1 = max(0, int(bbox.xmin * w))
-    y1 = max(0, int(bbox.ymin * h))
-    x2 = min(w, x1 + int(bbox.width * w))
-    y2 = min(h, y1 + int(bbox.height * h))
+    x = max(0, int(bbox.xmin * w))
+    y = max(0, int(bbox.ymin * h))
+    bw = int(bbox.width * w)
+    bh = int(bbox.height * h)
 
-    face_img = img[y1:y2, x1:x2]
+    face_img = img[y:y+bh, x:x+bw]
 
     if face_img.size == 0:
         return jsonify({"error": "Invalid face crop"}), 400
 
-    # ===== PREPROCESS =====
     gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
     face = cv2.resize(gray, (48, 48))
     face = face.flatten() / 255.0
 
-    # ===== PREDICT =====
     probs = model.predict_proba([face])[0]
 
     result = {labels[i]: float(probs[i]) for i in range(len(labels))}
@@ -86,7 +85,6 @@ def predict():
         "confidence": confidence,
         "all_emotions": result
     })
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
