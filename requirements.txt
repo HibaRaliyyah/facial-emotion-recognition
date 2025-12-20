@@ -6,3 +6,4 @@ Pillow==10.2.0
 mediapipe==0.10.9
 scikit-learn
 joblib
+requests
