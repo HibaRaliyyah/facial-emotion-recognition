@@ -31,21 +31,23 @@ def predict():
 
     image = None
 
-    # 1️⃣ multipart/form-data (binary)
+    # 1️⃣ multipart/form-data (binary upload)
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
 
-    # 2️⃣ base64 JSON
-    elif request.is_json and "image" in request.json:
-        image_bytes = base64.b64decode(request.json["image"])
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-    # 3️⃣ image_url JSON (THIS IS WHAT n8n SENDS)
+    # 2️⃣ image_url JSON (n8n sends THIS)
     elif request.is_json and "image_url" in request.json:
-        import requests
         resp = requests.get(request.json["image_url"], timeout=10)
         resp.raise_for_status()
         image = Image.open(io.BytesIO(resp.content)).convert("RGB")
+
+    # 3️⃣ base64 JSON (ONLY if actually base64)
+    elif request.is_json and "image" in request.json:
+        try:
+            image_bytes = base64.b64decode(request.json["image"], validate=True)
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception:
+            return jsonify({"error": "Invalid base64 image"}), 400
 
     else:
         return jsonify({"error": "No image provided"}), 400
@@ -83,7 +85,6 @@ def predict():
         "confidence": confidence,
         "all_emotions": result
     })
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
