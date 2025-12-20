@@ -1,25 +1,19 @@
 from flask import Flask, request, jsonify
+import joblib
 import numpy as np
 import cv2
-import mediapipe as mp
-import joblib
 from PIL import Image
+import os
 import io
 import base64
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
-# Load model
-model = joblib.load("emotion_model.joblib")
-labels = joblib.load("labels.joblib")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-# MediaPipe
-mp_face = mp.solutions.face_detection
-face_detector = mp_face.FaceDetection(
-    model_selection=1,
-    min_detection_confidence=0.5
-)
+model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
+labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
 
 @app.route("/health")
 def health():
@@ -28,40 +22,29 @@ def health():
 @app.route("/predict", methods=["POST"])
 def predict():
 
-    # ---------- INPUT ----------
+    # INPUT
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
-
-    elif request.is_json:
-        b64 = request.json.get("image")
-        image_bytes = base64.b64decode(b64)
+    elif request.is_json and "image" in request.json:
+        image_bytes = base64.b64decode(request.json["image"])
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
     else:
         return jsonify({"error": "No image provided"}), 400
 
+    # PREPROCESS
     img = np.array(image)
-    h, w, _ = img.shape
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    face = cv2.resize(gray, (48, 48)).flatten() / 255.0
 
-    # ---------- FACE DETECTION ----------
-    results = face_detector.process(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    if not results.detections:
-        return jsonify({"error": "No face detected"}), 400
+    # PREDICT
+    probs = model.predict_proba([face])[0]
 
-    bbox = results.detections[0].location_data.relative_bounding_box
-    x, y = int(bbox.xmin * w), int(bbox.ymin * h)
-    bw, bh = int(bbox.width * w), int(bbox.height * h)
-
-    face = cv2.cvtColor(img[y:y+bh, x:x+bw], cv2.COLOR_RGB2GRAY)
-    face = cv2.resize(face, (48, 48))
-    face = face.flatten().reshape(1, -1) / 255.0
-
-    # ---------- PREDICT ----------
-    probs = model.predict_proba(face)[0]
     result = {labels[i]: float(probs[i]) for i in range(len(labels))}
 
+    dominant = labels[int(np.argmax(probs))]
+
     return jsonify({
-        "dominant_emotion": labels[int(np.argmax(probs))],
+        "dominant_emotion": dominant,
         "confidence": float(np.max(probs)),
         "all_emotions": result
     })
