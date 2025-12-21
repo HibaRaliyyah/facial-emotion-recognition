@@ -17,9 +17,10 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
 labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
 
+# ✅ CHANGE 1: Better MediaPipe config for selfies
 mp_face = mp.solutions.face_detection.FaceDetection(
-    model_selection=0,
-    min_detection_confidence=0.5
+    model_selection=1,          # was 0
+    min_detection_confidence=0.3  # was 0.5
 )
 
 @app.route("/health")
@@ -41,7 +42,7 @@ def predict():
         resp.raise_for_status()
         image = Image.open(io.BytesIO(resp.content)).convert("RGB")
 
-    # 3️⃣ base64 JSON (ONLY if actually base64)
+    # 3️⃣ base64 JSON
     elif request.is_json and "image" in request.json:
         try:
             image_bytes = base64.b64decode(request.json["image"], validate=True)
@@ -68,7 +69,17 @@ def predict():
     bw = int(bbox.width * w)
     bh = int(bbox.height * h)
 
-    face_img = img[y:y+bh, x:x+bw]
+    # ✅ CHANGE 2: SAFE bounding box clamp
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(w, x + bw)
+    y2 = min(h, y + bh)
+
+    face_img = img[y1:y2, x1:x2]
+
+    # ✅ CHANGE 3: Prevent empty crop crash
+    if face_img.size == 0:
+        return jsonify({"error": "Face crop failed"}), 400
 
     gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
     face = cv2.resize(gray, (48, 48))
