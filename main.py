@@ -55,24 +55,19 @@ def predict():
     try:
         image = None
 
-        # 1️⃣ multipart/form-data
-        if "image" in request.files:
-            image = Image.open(request.files["image"].stream).convert("RGB")
-
-        # 2️⃣ image_url
-        elif request.is_json and "image_url" in request.json:
-            resp = requests.get(request.json["image_url"], timeout=10)
-            resp.raise_for_status()
-            image = Image.open(io.BytesIO(resp.content)).convert("RGB")
-
-        # 3️⃣ base64 JSON
-        elif request.is_json and "image" in request.json:
+        # =====================
+        # LOAD IMAGE
+        # =====================
+        if request.is_json and "image" in request.json:
             image_bytes = base64.b64decode(request.json["image"])
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
         else:
             return jsonify({"error": "No image provided"}), 400
 
+        # =====================
+        # RESIZE (VERY IMPORTANT)
+        # =====================
+        image.thumbnail((640, 640))  # 🔥 improves detection
         img = np.array(image)
         rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
@@ -80,7 +75,10 @@ def predict():
         results = mp_face.process(rgb)
 
         if not results.detections:
-            return jsonify({"error": "No face detected"}), 400
+            return jsonify({
+                "error": "No face detected",
+                "hint": "Use a clear frontal face image with good lighting"
+            }), 400
 
         bbox = results.detections[0].location_data.relative_bounding_box
         h, w, _ = img.shape
@@ -102,6 +100,17 @@ def predict():
         probs = model.predict_proba([face])[0]
 
         result = {labels[i]: float(probs[i]) for i in range(len(labels))}
+
+        return jsonify({
+            "dominant_emotion": labels[int(np.argmax(probs))],
+            "confidence": float(np.max(probs)),
+            "all_emotions": result
+        })
+
+    except Exception as e:
+        print("🔥 Prediction error:", e)
+        return jsonify({"error": "Prediction failed"}), 500
+
 
         return jsonify({
             "dominant_emotion": labels[int(np.argmax(probs))],
