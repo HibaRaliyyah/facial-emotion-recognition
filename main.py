@@ -1,7 +1,10 @@
 import os
 
-# 🔥 FORCE CPU MODE (MUST BE FIRST)
+# =====================================================
+# 🔥 FORCE CPU MODE (MUST BE FIRST — BEFORE ANY IMPORTS)
+# =====================================================
 os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 from flask import Flask, request, jsonify
@@ -11,21 +14,30 @@ import numpy as np
 import cv2
 from PIL import Image
 import joblib
-import mediapipe as mp
 
+# 🚫 DO NOT use: import mediapipe as mp
+# ✅ CPU-SAFE import
+from mediapipe.python.solutions import face_detection
+
+# =====================================================
+# APP SETUP
+# =====================================================
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-# ================================
-# GLOBAL SINGLETONS
-# ================================
+# =====================================================
+# GLOBAL SINGLETONS (LOW MEMORY)
+# =====================================================
 model = None
 labels = None
-face_detector = None
+detector = None
 
 
+# =====================================================
+# LOAD MODEL (LAZY)
+# =====================================================
 def load_model():
     global model, labels
     if model is None:
@@ -35,22 +47,31 @@ def load_model():
     return model, labels
 
 
+# =====================================================
+# LOAD FACE DETECTOR (CPU ONLY)
+# =====================================================
 def load_face_detector():
-    global face_detector
-    if face_detector is None:
-        print("🔹 Loading MediaPipe (CPU ONLY)...")
-        face_detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=0,              # CPU-safe
+    global detector
+    if detector is None:
+        print("🔹 Loading MediaPipe FaceDetection (CPU ONLY)")
+        detector = face_detection.FaceDetection(
+            model_selection=0,            # CPU SAFE
             min_detection_confidence=0.3
         )
-    return face_detector
+    return detector
 
 
-@app.route("/health")
+# =====================================================
+# HEALTH CHECK
+# =====================================================
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
+# =====================================================
+# EMOTION PREDICTION
+# =====================================================
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -61,17 +82,22 @@ def predict():
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
-        # Decode base64
+        # =======================
+        # DECODE BASE64 IMAGE
+        # =======================
         image_bytes = base64.b64decode(image_b64)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        # Resize improves detection
+        # Resize improves detection & reduces memory
         image.thumbnail((640, 640))
         img = np.array(image)
 
-        # MediaPipe REQUIRES RGB
+        # MediaPipe expects RGB
         rgb = img
 
+        # =======================
+        # FACE DETECTION
+        # =======================
         detector = load_face_detector()
         results = detector.process(rgb)
 
@@ -94,10 +120,16 @@ def predict():
         if face_img.size == 0:
             return jsonify({"error": "Face crop failed"}), 400
 
+        # =======================
+        # PREPROCESS FOR MODEL
+        # =======================
         gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
         face = cv2.resize(gray, (48, 48))
         face = face.flatten() / 255.0
 
+        # =======================
+        # PREDICTION
+        # =======================
         model, labels = load_model()
         probs = model.predict_proba([face])[0]
 
@@ -114,6 +146,9 @@ def predict():
         return jsonify({"error": "Prediction failed"}), 500
 
 
+# =====================================================
+# ENTRY POINT
+# =====================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
