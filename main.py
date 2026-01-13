@@ -1,5 +1,10 @@
-from flask import Flask, request, jsonify
 import os
+
+# 🔥 FORCE CPU MODE (MUST BE FIRST)
+os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+from flask import Flask, request, jsonify
 import io
 import base64
 import numpy as np
@@ -33,17 +38,14 @@ def load_model():
 def load_face_detector():
     global face_detector
     if face_detector is None:
-        print("🔹 Loading MediaPipe Face Detector...")
+        print("🔹 Loading MediaPipe (CPU ONLY)...")
         face_detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=0,              # 🔥 better for front faces
+            model_selection=0,              # CPU-safe
             min_detection_confidence=0.3
         )
     return face_detector
 
 
-# ================================
-# ROUTES
-# ================================
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -52,9 +54,6 @@ def health():
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # =====================
-        # VALIDATE INPUT
-        # =====================
         if not request.is_json:
             return jsonify({"error": "Request must be JSON"}), 400
 
@@ -62,22 +61,16 @@ def predict():
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
-        # =====================
-        # DECODE IMAGE
-        # =====================
+        # Decode base64
         image_bytes = base64.b64decode(image_b64)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        print("✅ Image received:", image.size)
-
-        # Resize for stability
+        # Resize improves detection
         image.thumbnail((640, 640))
         img = np.array(image)
 
-        # =====================
-        # MediaPipe needs RGB
-        # =====================
-        rgb = img  # 🔥 DO NOT CONVERT TO BGR
+        # MediaPipe REQUIRES RGB
+        rgb = img
 
         detector = load_face_detector()
         results = detector.process(rgb)
@@ -88,9 +81,6 @@ def predict():
                 "hint": "Use a clear frontal face image with good lighting"
             }), 400
 
-        # =====================
-        # FACE CROP
-        # =====================
         detection = results.detections[0]
         bbox = detection.location_data.relative_bounding_box
 
@@ -104,9 +94,6 @@ def predict():
         if face_img.size == 0:
             return jsonify({"error": "Face crop failed"}), 400
 
-        # =====================
-        # PREPROCESS FOR MODEL
-        # =====================
         gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
         face = cv2.resize(gray, (48, 48))
         face = face.flatten() / 255.0
