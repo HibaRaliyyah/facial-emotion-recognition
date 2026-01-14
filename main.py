@@ -1,154 +1,101 @@
-import os
-
-# =====================================================
-# 🔥 FORCE CPU MODE (MUST BE FIRST — BEFORE ANY IMPORTS)
-# =====================================================
-os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 from flask import Flask, request, jsonify
-import io
-import base64
+import joblib
 import numpy as np
 import cv2
 from PIL import Image
-import joblib
+import os
+import io
+import base64
+import mediapipe as mp
+import requests
 
-# 🚫 DO NOT use: import mediapipe as mp
-# ✅ CPU-SAFE import
-from mediapipe.python.solutions import face_detection
-
-# =====================================================
-# APP SETUP
-# =====================================================
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-# =====================================================
-# GLOBAL SINGLETONS (LOW MEMORY)
-# =====================================================
-model = None
-labels = None
-detector = None
+model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
+labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
 
+# ✅ CHANGE 1: Better MediaPipe config for selfies
+mp_face = mp.solutions.face_detection.FaceDetection(
+    model_selection=1,          # was 0
+    min_detection_confidence=0.3  # was 0.5
+)
 
-# =====================================================
-# LOAD MODEL (LAZY)
-# =====================================================
-def load_model():
-    global model, labels
-    if model is None:
-        print("🔹 Loading emotion model...")
-        model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
-        labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
-    return model, labels
-
-
-# =====================================================
-# LOAD FACE DETECTOR (CPU ONLY)
-# =====================================================
-def load_face_detector():
-    global detector
-    if detector is None:
-        print("🔹 Loading MediaPipe FaceDetection (CPU ONLY)")
-        detector = face_detection.FaceDetection(
-            model_selection=0,            # CPU SAFE
-            min_detection_confidence=0.3
-        )
-    return detector
-
-
-# =====================================================
-# HEALTH CHECK
-# =====================================================
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
-
-# =====================================================
-# EMOTION PREDICTION
-# =====================================================
 @app.route("/predict", methods=["POST"])
 def predict():
-    try:
-        if not request.is_json:
-            return jsonify({"error": "Request must be JSON"}), 400
 
-        image_b64 = request.json.get("image")
-        if not image_b64:
-            return jsonify({"error": "No image provided"}), 400
+    image = None
 
-        # =======================
-        # DECODE BASE64 IMAGE
-        # =======================
-        image_bytes = base64.b64decode(image_b64)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    # 1️⃣ multipart/form-data (binary upload)
+    if "image" in request.files:
+        image = Image.open(request.files["image"].stream).convert("RGB")
 
-        # Resize improves detection & reduces memory
-        image.thumbnail((640, 640))
-        img = np.array(image)
+    # 2️⃣ image_url JSON (n8n sends THIS)
+    elif request.is_json and "image_url" in request.json:
+        resp = requests.get(request.json["image_url"], timeout=10)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
 
-        # MediaPipe expects RGB
-        rgb = img
+    # 3️⃣ base64 JSON
+    elif request.is_json and "image" in request.json:
+        try:
+            image_bytes = base64.b64decode(request.json["image"], validate=True)
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception:
+            return jsonify({"error": "Invalid base64 image"}), 400
 
-        # =======================
-        # FACE DETECTION
-        # =======================
-        detector = load_face_detector()
-        results = detector.process(rgb)
+    else:
+        return jsonify({"error": "No image provided"}), 400
 
-        if not results.detections:
-            return jsonify({
-                "error": "No face detected",
-                "hint": "Use a clear frontal face image with good lighting"
-            }), 400
+    # ===== IMAGE PROCESSING =====
+    img = np.array(image)
+    rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-        detection = results.detections[0]
-        bbox = detection.location_data.relative_bounding_box
+    results = mp_face.process(rgb)
+    if not results.detections:
+        return jsonify({"error": "No face detected"}), 400
 
-        h, w, _ = img.shape
-        x1 = max(0, int(bbox.xmin * w))
-        y1 = max(0, int(bbox.ymin * h))
-        x2 = min(w, int((bbox.xmin + bbox.width) * w))
-        y2 = min(h, int((bbox.ymin + bbox.height) * h))
+    bbox = results.detections[0].location_data.relative_bounding_box
+    h, w, _ = img.shape
 
-        face_img = img[y1:y2, x1:x2]
-        if face_img.size == 0:
-            return jsonify({"error": "Face crop failed"}), 400
+    x = int(bbox.xmin * w)
+    y = int(bbox.ymin * h)
+    bw = int(bbox.width * w)
+    bh = int(bbox.height * h)
 
-        # =======================
-        # PREPROCESS FOR MODEL
-        # =======================
-        gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
-        face = cv2.resize(gray, (48, 48))
-        face = face.flatten() / 255.0
+    # ✅ CHANGE 2: SAFE bounding box clamp
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(w, x + bw)
+    y2 = min(h, y + bh)
 
-        # =======================
-        # PREDICTION
-        # =======================
-        model, labels = load_model()
-        probs = model.predict_proba([face])[0]
+    face_img = img[y1:y2, x1:x2]
 
-        emotions = {labels[i]: float(probs[i]) for i in range(len(labels))}
+    # ✅ CHANGE 3: Prevent empty crop crash
+    if face_img.size == 0:
+        return jsonify({"error": "Face crop failed"}), 400
 
-        return jsonify({
-            "dominant_emotion": labels[int(np.argmax(probs))],
-            "confidence": float(np.max(probs)),
-            "all_emotions": emotions
-        })
+    gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
+    face = cv2.resize(gray, (48, 48))
+    face = face.flatten() / 255.0
 
-    except Exception as e:
-        print("🔥 Prediction error:", str(e))
-        return jsonify({"error": "Prediction failed"}), 500
+    probs = model.predict_proba([face])[0]
 
+    result = {labels[i]: float(probs[i]) for i in range(len(labels))}
+    dominant = labels[int(np.argmax(probs))]
+    confidence = float(np.max(probs))
 
-# =====================================================
-# ENTRY POINT
-# =====================================================
+    return jsonify({
+        "dominant_emotion": dominant,
+        "confidence": confidence,
+        "all_emotions": result
+    })
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8000)
