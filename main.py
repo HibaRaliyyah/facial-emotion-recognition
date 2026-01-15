@@ -1,13 +1,9 @@
-import os
-# 🚨 MUST disable GPU for MediaPipe on cloud
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 from flask import Flask, request, jsonify
 import joblib
 import numpy as np
 import cv2
 from PIL import Image
+import os
 import io
 import base64
 import mediapipe as mp
@@ -15,23 +11,17 @@ import requests
 
 app = Flask(__name__)
 
-# ---------- LOAD MODEL ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
 model = joblib.load(os.path.join(MODEL_DIR, "emotion_model.joblib"))
 labels = joblib.load(os.path.join(MODEL_DIR, "labels.joblib"))
 
-# ---------- MEDIAPIPE ----------
+# ✅ CHANGE 1: Better MediaPipe config for selfies
 mp_face = mp.solutions.face_detection.FaceDetection(
-    model_selection=1,
-    min_detection_confidence=0.3
+    model_selection=1,          # was 0
+    min_detection_confidence=0.3  # was 0.5
 )
-
-# ---------- ROUTES ----------
-@app.route("/")
-def root():
-    return jsonify({"status": "running"})
 
 @app.route("/health")
 def health():
@@ -39,13 +29,14 @@ def health():
 
 @app.route("/predict", methods=["POST"])
 def predict():
+
     image = None
 
-    # 1️⃣ multipart/form-data
+    # 1️⃣ multipart/form-data (binary upload)
     if "image" in request.files:
         image = Image.open(request.files["image"].stream).convert("RGB")
 
-    # 2️⃣ image_url JSON
+    # 2️⃣ image_url JSON (n8n sends THIS)
     elif request.is_json and "image_url" in request.json:
         resp = requests.get(request.json["image_url"], timeout=10)
         resp.raise_for_status()
@@ -54,14 +45,15 @@ def predict():
     # 3️⃣ base64 JSON
     elif request.is_json and "image" in request.json:
         try:
-            image_bytes = base64.b64decode(request.json["image"])
+            image_bytes = base64.b64decode(request.json["image"], validate=True)
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception:
-            return jsonify({"error": "Invalid base64"}), 400
+            return jsonify({"error": "Invalid base64 image"}), 400
 
     else:
         return jsonify({"error": "No image provided"}), 400
 
+    # ===== IMAGE PROCESSING =====
     img = np.array(image)
     rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
@@ -72,12 +64,20 @@ def predict():
     bbox = results.detections[0].location_data.relative_bounding_box
     h, w, _ = img.shape
 
-    x1 = max(0, int(bbox.xmin * w))
-    y1 = max(0, int(bbox.ymin * h))
-    x2 = min(w, int((bbox.xmin + bbox.width) * w))
-    y2 = min(h, int((bbox.ymin + bbox.height) * h))
+    x = int(bbox.xmin * w)
+    y = int(bbox.ymin * h)
+    bw = int(bbox.width * w)
+    bh = int(bbox.height * h)
+
+    # ✅ CHANGE 2: SAFE bounding box clamp
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(w, x + bw)
+    y2 = min(h, y + bh)
 
     face_img = img[y1:y2, x1:x2]
+
+    # ✅ CHANGE 3: Prevent empty crop crash
     if face_img.size == 0:
         return jsonify({"error": "Face crop failed"}), 400
 
@@ -97,8 +97,5 @@ def predict():
         "all_emotions": result
     })
 
-
-# Fly.io uses PORT env
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8000)
