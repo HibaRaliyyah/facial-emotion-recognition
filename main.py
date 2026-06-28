@@ -59,30 +59,35 @@ def predict():
     img = np.array(image)
     rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    results = mp_face.process(rgb)
+    results = mp_face.process(img)
+
     if not results.detections:
         return jsonify({"error": "No face detected"}), 400
 
     bbox = results.detections[0].location_data.relative_bounding_box
     h, w, _ = img.shape
-
+    
     x = int(bbox.xmin * w)
     y = int(bbox.ymin * h)
     bw = int(bbox.width * w)
     bh = int(bbox.height * h)
 
-    # ✅ CHANGE 2: SAFE bounding box clamp
-    x1 = max(0, x)
-    y1 = max(0, y)
-    x2 = min(w, x + bw)
-    y2 = min(h, y + bh)
+    # Add margin to match FER-2013 crops (which include more of the head)
+    # MediaPipe bounding boxes are very tight around facial features
+    margin_x = int(bw * 0.2)
+    margin_y = int(bh * 0.3)  # More margin on top/bottom for forehead/chin
+    
+    x1 = max(0, x - margin_x)
+    y1 = max(0, y - int(margin_y * 1.5)) # extra space for forehead
+    x2 = min(w, x + bw + margin_x)
+    y2 = min(h, y + bh + margin_y)
 
     face_img = img[y1:y2, x1:x2]
-
-    # ✅ CHANGE 3: Prevent empty crop crash
+    
+    # Handle case where crop is invalid (e.g., width or height is 0)
     if face_img.size == 0:
-        return jsonify({"error": "Face crop failed"}), 400
-
+        return jsonify({"error": "Invalid face crop"}), 400
+        
     gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
     face = cv2.resize(gray, (48, 48))
     face = face.flatten() / 255.0
